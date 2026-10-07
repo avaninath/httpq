@@ -1,13 +1,20 @@
 package httpq
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 )
+
+// maxBodyBytes caps the size of a published message.
+const maxBodyBytes = 1 << 20 // 1 MiB
 
 // HTTPQ is a message broker that passes messages from producers to
 // consumers over named channels. A producer blocks until a consumer
@@ -15,6 +22,7 @@ import (
 type HTTPQ struct {
 	mu       sync.Mutex             // guards channels
 	channels map[string]chan []byte // topic name -> its channel
+	timeout  time.Duration          // decides how long publish/consume wait for the other side
 
 	RxBytes  int // number of bytes (message body) consumed
 	TxBytes  int // number of bytes (message body) published
@@ -22,10 +30,12 @@ type HTTPQ struct {
 	SubFails int // number of subscribe failures
 }
 
-// New returns an HTTPQ that is ready to serve requests.
-func New() *HTTPQ {
+// New returns an HTTPQ that is ready to serve requests. Publish and consume
+// wait up to timeout for the other side before giving up.
+func New(timeout time.Duration) *HTTPQ {
 	return &HTTPQ{
 		channels: make(map[string]chan []byte),
+		timeout:  timeout,
 	}
 }
 
@@ -55,26 +65,52 @@ func (h *HTTPQ) Handler() http.Handler {
 	return r
 }
 
-// Publish returns a handler that publishes the request body to a channel.
+// Publish returns a handler that hands the request body to a consumer of the
+// channel, waiting up to the broker's timeout for one to arrive.
 func (h *HTTPQ) Publish() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+		if err != nil {
+			http.Error(w, "could not read body", http.StatusBadRequest)
+			return
+		}
+
 		topic := chi.URLParam(r, "channel")
 		ch := h.channel(topic)
-		_, err := fmt.Fprintf(w, "publish to %s via %p\n", topic, ch)
-		if err != nil {
-			log.Println("write failed:", err)
+
+		ctx, cancel := context.WithTimeout(r.Context(), h.timeout)
+		defer cancel()
+
+		select {
+		case ch <- body:
+			w.WriteHeader(http.StatusOK)
+		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				http.Error(w, "no consumer arrived in time", http.StatusGatewayTimeout)
+			}
 		}
 	})
 }
 
-// Consume returns a handler that delivers the next message on a channel to the caller.
+// Consume returns a handler that waits up to the broker's timeout for a message
+// on the channel and writes it to the caller.
 func (h *HTTPQ) Consume() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		topic := chi.URLParam(r, "channel")
 		ch := h.channel(topic)
-		_, err := fmt.Fprintf(w, "consume from %s via %p\n", topic, ch)
-		if err != nil {
-			log.Println("write failed:", err)
+
+		ctx, cancel := context.WithTimeout(r.Context(), h.timeout)
+		defer cancel()
+
+		select {
+		case msg := <-ch:
+			if _, err := w.Write(msg); err != nil {
+				log.Println("write failed:", err)
+			}
+		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				http.Error(w, "no producer arrived in time", http.StatusGatewayTimeout)
+			}
 		}
 	})
 }
