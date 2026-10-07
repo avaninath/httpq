@@ -86,8 +86,11 @@ func (h *HTTPQ) Publish() http.Handler {
 			w.WriteHeader(http.StatusOK)
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				log.Printf("publish to %q: timed out after %s waiting for a consumer", topic, h.timeout)
 				http.Error(w, "no consumer arrived in time", http.StatusGatewayTimeout)
+				return
 			}
+			log.Printf("publish to %q: client disconnected before a consumer arrived", topic)
 		}
 	})
 }
@@ -109,8 +112,11 @@ func (h *HTTPQ) Consume() http.Handler {
 			}
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				log.Printf("consume from %q: timed out after %s waiting for a producer", topic, h.timeout)
 				http.Error(w, "no producer arrived in time", http.StatusGatewayTimeout)
+				return
 			}
+			log.Printf("consume from %q: client disconnected before a producer arrived", topic)
 		}
 	})
 }
