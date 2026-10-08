@@ -2,12 +2,13 @@ package httpq
 
 import (
 	"context"
+	"encoding/json/v2"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -24,10 +25,18 @@ type HTTPQ struct {
 	channels map[string]chan []byte // topic name -> its channel
 	timeout  time.Duration          // decides how long publish/consume wait for the other side
 
-	RxBytes  int // number of bytes (message body) consumed
-	TxBytes  int // number of bytes (message body) published
-	PubFails int // number of publish failures
-	SubFails int // number of subscribe failures
+	rxBytes  atomic.Int64 // bytes written out to the consumers
+	txBytes  atomic.Int64 // bytes handed over by the producers
+	pubFails atomic.Int64 // publishes that timed out waiting for a consumer
+	subFails atomic.Int64 // consumes that timed out waiting for a producer
+}
+
+// statsResponse is the JSON body returned by the stats endpoint.
+type statsResponse struct {
+	PublishFailures int64 `json:"publish_failures"`
+	ConsumeFailures int64 `json:"consume_failures"`
+	BytesPublished  int64 `json:"bytes_published"`
+	BytesConsumed   int64 `json:"bytes_consumed"`
 }
 
 // New returns an HTTPQ that is ready to serve requests. Publish and consume
@@ -83,9 +92,11 @@ func (h *HTTPQ) Publish() http.Handler {
 
 		select {
 		case ch <- body:
+			h.txBytes.Add(int64(len(body)))
 			w.WriteHeader(http.StatusOK)
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				h.pubFails.Add(1)
 				log.Printf("publish to %q: timed out after %s waiting for a consumer", topic, h.timeout)
 				http.Error(w, "no consumer arrived in time", http.StatusGatewayTimeout)
 				return
@@ -109,9 +120,12 @@ func (h *HTTPQ) Consume() http.Handler {
 		case msg := <-ch:
 			if _, err := w.Write(msg); err != nil {
 				log.Println("write failed:", err)
+				return
 			}
+			h.rxBytes.Add(int64(len(msg)))
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				h.subFails.Add(1)
 				log.Printf("consume from %q: timed out after %s waiting for a producer", topic, h.timeout)
 				http.Error(w, "no producer arrived in time", http.StatusGatewayTimeout)
 				return
@@ -121,10 +135,16 @@ func (h *HTTPQ) Consume() http.Handler {
 	})
 }
 
-// Stats returns a handler that reports the broker's statistics.
+// Stats returns a handler that reports the broker's statistics as JSON.
 func (h *HTTPQ) Stats() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, err := fmt.Fprintln(w, "stats: coming soon")
+		w.Header().Set("Content-Type", "application/json")
+		err := json.MarshalWrite(w, statsResponse{
+			PublishFailures: h.pubFails.Load(),
+			ConsumeFailures: h.subFails.Load(),
+			BytesPublished:  h.txBytes.Load(),
+			BytesConsumed:   h.rxBytes.Load(),
+		})
 		if err != nil {
 			log.Println("stats write failed:", err)
 		}
