@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"flag"
 	"log"
 	"net/http"
@@ -15,7 +16,21 @@ func main() {
 	flag.Parse()
 	q := httpq.New(*timeout)
 
-	log.Printf("listening on %s", *addr)
-	err := http.ListenAndServe(*addr, q.Handler())
-	log.Fatal(err)
+	cert, err := selfSignedCert()
+	if err != nil {
+		log.Fatal("error creating TLS certificate: ", err)
+	}
+
+	srv := &http.Server{
+		Addr:              *addr,
+		Handler:           q.Handler(),
+		TLSConfig:         &tls.Config{Certificates: []tls.Certificate{cert}},
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      *timeout + 10*time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	log.Printf("listening on %s (HTTPS, self-signed certificate)", *addr)
+	log.Fatal(srv.ListenAndServeTLS("", ""))
 }
