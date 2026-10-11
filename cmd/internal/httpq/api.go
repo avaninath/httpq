@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -55,13 +57,7 @@ func (h *HTTPQ) Publish() http.Handler {
 			h.txBytes.Add(int64(len(body)))
 			w.WriteHeader(http.StatusOK)
 		case <-ctx.Done():
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				h.pubFails.Add(1)
-				log.Printf("publish to %q: timed out after %s waiting for a consumer", topic, h.timeout)
-				http.Error(w, "no consumer arrived in time", http.StatusGatewayTimeout)
-				return
-			}
-			log.Printf("publish to %q: client disconnected before a consumer arrived", topic)
+			h.stoppedWaiting(ctx, w, &h.pubFails, fmt.Sprintf("publish to %q", topic), "consumer")
 		}
 	})
 }
@@ -84,13 +80,7 @@ func (h *HTTPQ) Consume() http.Handler {
 			}
 			h.rxBytes.Add(int64(len(msg)))
 		case <-ctx.Done():
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				h.subFails.Add(1)
-				log.Printf("consume from %q: timed out after %s waiting for a producer", topic, h.timeout)
-				http.Error(w, "no producer arrived in time", http.StatusGatewayTimeout)
-				return
-			}
-			log.Printf("consume from %q: client disconnected before a producer arrived", topic)
+			h.stoppedWaiting(ctx, w, &h.subFails, fmt.Sprintf("consume from %q", topic), "producer")
 		}
 	})
 }
@@ -109,4 +99,17 @@ func (h *HTTPQ) Stats() http.Handler {
 			log.Println("stats write failed:", err)
 		}
 	})
+}
+
+// stoppedWaiting handles a publish or consume whose wait ended before the handover.
+// A timeout is counted in failures, logged and answered with a 504. A client
+// disconnect is only logged.
+func (h *HTTPQ) stoppedWaiting(ctx context.Context, w http.ResponseWriter, failures *atomic.Int64, action, other string) {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		failures.Add(1)
+		log.Printf("%s: timed out after %s waiting for a %s", action, h.timeout, other)
+		http.Error(w, "no "+other+" arrived in time", http.StatusGatewayTimeout)
+		return
+	}
+	log.Printf("%s: client disconnected before a %s arrived", action, other)
 }
