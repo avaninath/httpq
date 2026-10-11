@@ -74,6 +74,7 @@ func (h *HTTPQ) Consume() http.Handler {
 
 		select {
 		case msg := <-ch:
+			w.Header().Set("Content-Type", "application/octet-stream")
 			if _, err := w.Write(msg); err != nil {
 				log.Println("write failed:", err)
 				return

@@ -332,6 +332,11 @@ func consume(t *testing.T, srv *httptest.Server, topic string) (int, string) {
 		t.Errorf("consume from %q: %v", topic, err)
 		return 0, ""
 	}
+	if resp.StatusCode == http.StatusOK {
+		if ct := resp.Header.Get("Content-Type"); ct != "application/octet-stream" {
+			t.Errorf("consume from %q: Content-Type = %q, want %q", topic, ct, "application/octet-stream")
+		}
+	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Errorf("consume from %q: read body: %v", topic, err)
