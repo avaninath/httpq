@@ -1,10 +1,15 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/avaninath/httpq/cmd/internal/httpq"
@@ -31,6 +36,22 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	log.Printf("listening on %s (HTTPS, self-signed certificate)", *addr)
-	log.Fatal(srv.ListenAndServeTLS("", ""))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		log.Printf("listening on %s (HTTPS, self-signed certificate)", *addr)
+		if err := srv.ListenAndServeTLS("", ""); !errors.Is(err, http.ErrServerClosed) {
+			log.Fatal(err)
+		}
+	}()
+
+	<-ctx.Done()
+	log.Println("shutting down")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Println("shutdown:", err)
+	}
 }
