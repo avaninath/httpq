@@ -1,3 +1,5 @@
+// Package httpq implements httpQ, a broker that hands messages from producers
+// to consumers over HTTP channels.
 package httpq
 
 import (
