@@ -1,3 +1,5 @@
+// Command httpq runs the httpQ broker as an HTTPS server with a self-signed
+// certificate.
 package main
 
 import (
